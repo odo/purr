@@ -13,12 +13,12 @@
          code_change/3]).
 
 -define(SYNCWORD, <<"PuRRpUrrPurrLFG">>).
--define(MESSAGEPREFIX, <<"pURR">>).
+-define(MESSAGEPREFIX, <<"purr">>).
 -define(SYNCINTERVAL, 250).
 
 -record(state, {uart, mode, reader_pid, syncword, receive_buffer = <<>>}).
--record(rpc, {caller_pid, module, function, arguments}).
--record(rpc_reply, {caller_pid, reply}).
+-record(rpc, {caller, module, function, arguments}).
+-record(rpc_reply, {caller, reply}).
 
 start() ->
     start_link(),
@@ -44,9 +44,9 @@ init([]) ->
     self() !  send_sync,
     {ok, InitialState}.
 
-handle_call({rpc, Module, Function, Arguments}, CallerPid, State = #state{mode = online, uart = UART}) ->
+handle_call({rpc, Module, Function, Arguments}, Caller, State = #state{mode = online, uart = UART}) ->
     Call = #rpc{
-        caller_pid = CallerPid,
+        caller = Caller,
         module = Module,
         function = Function,
         arguments = Arguments
@@ -54,7 +54,7 @@ handle_call({rpc, Module, Function, Arguments}, CallerPid, State = #state{mode =
     CallBinary = term_to_binary(Call),
     Payload = <<?MESSAGEPREFIX/binary, (size(CallBinary)):32/integer, CallBinary/binary>>,
     uart:write(UART, Payload),
-    {noreply, State#state{}};
+    {noreply, State};
 handle_call({rpc, _, _, _}, _From, State) ->
     {reply, {error, not_online}, State}.
 
@@ -73,7 +73,7 @@ handle_info({received, Data}, State = #state{mode = syncing, syncword = Syncword
         match ->
             {noreply, State#state{mode = online, syncword = ?SYNCWORD}};
         {match, AdditionalData} ->
-            ?MODULE ! {received, AdditionalData},
+            self() ! {received, AdditionalData},
             {noreply, State#state{mode = online, syncword = ?SYNCWORD}};
         mismatch ->
             {noreply, State}
@@ -82,11 +82,12 @@ handle_info({received, Data}, State = #state{mode = online, receive_buffer = Rec
     ReceivedData = <<ReceiveBuffer/binary, Data/binary>>,
     case maybe_parse_received_data(ReceivedData) of
         {rpc, RPC = #rpc{}, RestReceived} ->
-            spawn(fun() -> call_rpc(RPC, self()) end),
+            ServerPid = self(),
+            spawn(fun() -> call_rpc(RPC, ServerPid) end),
             {noreply, State#state{receive_buffer = RestReceived}};
-        {reply, #rpc_reply{caller_pid = CallerPid, reply = Reply}, RestReceived} ->
+        {reply, #rpc_reply{caller = Caller, reply = Reply}, RestReceived} ->
             % we got a reply and potentially more data
-            gen_server:reply(CallerPid, Reply),
+            gen_server:reply(Caller, Reply),
             {noreply, State#state{receive_buffer = RestReceived}};
         incomplete ->
             % we are still waiting for the full reply
@@ -112,7 +113,7 @@ read_loop(UART, ReplyPid) ->
     ReplyPid ! {received, Data}.
 
 %% receiving data
-maybe_parse_received_data(<<MessagePrefix:(size(?MESSAGEPREFIX))/binary, Payload>>) ->
+maybe_parse_received_data(<<MessagePrefix:(byte_size(?MESSAGEPREFIX))/binary, Payload/binary>>) ->
     case MessagePrefix of
         ?MESSAGEPREFIX -> parse_received_data(Payload);
         _ -> error
@@ -120,7 +121,7 @@ maybe_parse_received_data(<<MessagePrefix:(size(?MESSAGEPREFIX))/binary, Payload
 maybe_parse_received_data(_) ->
     incomplete.
 
-parse_received_data(<<Length:32/integer, BinaryData:Length/binary, RestReceived>>) ->
+parse_received_data(<<Length:32/integer, BinaryData:Length/binary, RestReceived/binary>>) ->
    MaybeData =
    try binary_to_term(BinaryData) of
        Data -> Data
@@ -138,19 +139,19 @@ parse_received_data(_) ->
     incomplete.
 
 %% running local RPCs
-call_rpc(#rpc{caller_pid = CallerPid, module = Module, function = Function, arguments = Arguments}, ReplyPid) ->
+call_rpc(#rpc{caller = Caller, module = Module, function = Function, arguments = Arguments}, ReplyPid) ->
     try apply(Module, Function, Arguments) of
         Result ->
-            Result = {ok, Result},
-            Reply = #rpc_reply{caller_pid = CallerPid, reply = Result},
+            Reply = #rpc_reply{caller = Caller, reply = {ok, Result}},
             ReplyBinary = term_to_binary(Reply),
             Payload = <<?MESSAGEPREFIX/binary, (size(ReplyBinary)):32/integer, ReplyBinary/binary>>,
+
             ReplyPid ! {reply, Payload}
         catch
             error:Error ->
-                {error, error, Error};
+                ReplyPid ! {error, error, Error};
             throw:Throw ->
-                {error, throw, Throw};
+                ReplyPid ! {error, throw, Throw};
             exit:Exit ->
-                {error, exit, Exit}
+                ReplyPid ! {error, exit, Exit}
     end.
