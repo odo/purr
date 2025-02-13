@@ -22,13 +22,16 @@
 
 start() ->
     start_link(),
+    timer:sleep(100),
     request_loop(0).
 
 request_loop(I) ->
-    timer:sleep(50),
     try
-        Reply = rpc(math, pow, [I, 1], 200),
-        io:format("~p: reply: ~p ~n", [?MODULE, Reply])
+        Reply = rpc(math, pow, [I, 1], 100),
+        case I rem 100 of
+            0 -> io:format("~p: reply ~p: ~p ~n", [?MODULE, I, Reply]);
+            _ -> noop
+        end
     catch
         exit:Reason ->
             io:format("~p: call ~p failed: ~p ~n", [?MODULE, I, Reason])
@@ -41,7 +44,7 @@ start_link() ->
 rpc(Module, Function, Arguments) ->
     rpc(Module, Function, Arguments, 5000).
 rpc(Module, Function, Arguments, Timeout) ->
-    gen_server:call(?MODULE, {rpc, Module, Function, Arguments}, Timeout).
+    gen_server:call(?MODULE, {rpc, Module, Function, Arguments, Timeout}, Timeout).
 
 init([]) ->
     UART = uart:open("UART1", [{rx, 17}, {tx, 18}]),
@@ -59,9 +62,9 @@ init([]) ->
     self() !  send_sync,
     {ok, InitialState}.
 
-handle_call({rpc, Module, Function, Arguments}, Caller, State = #state{mode = online, uart = UART, calls = Calls, next_call_id = NextCallId}) ->
+handle_call({rpc, Module, Function, Arguments, Timeout}, Caller, State = #state{mode = online, uart = UART, calls = Calls, next_call_id = CallId}) ->
     Call = #rpc{
-        call_id = NextCallId,
+        call_id = CallId,
         module = Module,
         function = Function,
         arguments = Arguments
@@ -69,8 +72,11 @@ handle_call({rpc, Module, Function, Arguments}, Caller, State = #state{mode = on
     CallBinary = encode(Call),
     Payload = <<?MESSAGEPREFIX/binary, (size(CallBinary)):32/integer, CallBinary/binary>>,
     uart:write(UART, Payload),
-    NextCalls = maps:put(NextCallId, Caller, Calls),
-    {noreply, State#state{next_call_id = NextCallId + 1, calls = NextCalls}};
+    NextCalls = maps:put(CallId, Caller, Calls),
+    % if the call never returns we need to make sure
+    % the call data is cleaned up
+    erlang:send_after(Timeout + 50, self(), {clean_call, CallId}),
+    {noreply, State#state{next_call_id = CallId + 1, calls = NextCalls}};
 handle_call({rpc, _, _, _}, _From, State) ->
     {reply, {error, not_online}, State}.
 
@@ -78,7 +84,7 @@ handle_cast(_, State) ->
     {noreply, State}.
 
 handle_info(send_sync, State = #state{uart = UART, mode = Mode}) ->
-            io:format("~p: state: ~p~n", [?MODULE, State]),
+    % io:format("~p: state: ~p~n", [?MODULE, State]),
     uart:write(UART, [?SYNCWORD]),
     erlang:send_after(?SYNCINTERVAL, self(), send_sync),
     case Mode of
@@ -113,7 +119,7 @@ handle_info({received, Data}, State = #state{mode = online, receive_buffer = Rec
 
             {ok, Caller} = maps:find(CallId, Calls),
             NextCalls = maps:remove(CallId, Calls),
-            io:format("~p: Replying to ~p~n", [?MODULE, CallId]),
+            % io:format("~p: Replying to ~p~n", [?MODULE, CallId]),
             gen_server:reply(Caller, Reply),
             {noreply, State#state{receive_buffer = RestReceived, calls = NextCalls}};
         incomplete ->
@@ -125,7 +131,7 @@ handle_info({received, Data}, State = #state{mode = online, receive_buffer = Rec
             {noreply, State};
         error ->
             % something went wrong, we loop the data in sync mode
-            io:format("~p: cant parse ~p, syncing~n", [?MODULE, ReceivedData]),
+            % io:format("~p: cant parse ~p, syncing~n", [?MODULE, ReceivedData]),
 
             self() ! {received, ReceivedData},
             {noreply,State#state{receive_buffer = <<>>, mode = syncing}}
@@ -137,9 +143,18 @@ handle_info(Msg = {reply, _}, State = #state{mode = syncing}) ->
     % we are currently syncing
     % we put the message back in the inbox
     % for later
-    io:format("~p: message while syncing: ~p ~p~n", [?MODULE, Msg, State]),
+    % io:format("~p: message while syncing: ~p ~p~n", [?MODULE, Msg, State]),
     self() ! Msg,
-    {noreply, State}.
+    {noreply, State};
+handle_info({clean_call, CallId}, State = #state{calls = Calls}) ->
+    case Calls of
+        #{ CallId := _} ->
+            % io:format("~p: cleaning up call ~p~n", [?MODULE, CallId]),
+            NextCalls = maps:remove(CallId, Calls),
+            {noreply, State#state{calls = NextCalls}};
+        _ ->
+            {noreply, State}
+    end.
 
 terminate(_Reason, _State) ->
     ok.
