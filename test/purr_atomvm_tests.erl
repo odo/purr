@@ -11,7 +11,8 @@ syncword_test_() ->
         fun test_syncing_with_prefix/0,
         fun test_syncing_in_parts/0,
         fun test_failed_syncing/0,
-        fun test_roundtrip/0
+        fun test_roundtrip/0,
+        fun test_double_roundtrip/0
     ]}.
 
 setup() ->
@@ -67,6 +68,42 @@ test_roundtrip() ->
     purr_atomvm:handle_info({received, RpcReply}, online_state()),
     {GenServerRef, {ok, [1,2,3,4,5,6,7]}} = get_rpc_result().
 
+test_double_roundtrip() ->
+    % requesting side
+    % request1
+    GenServerRef1 = make_ref(),
+    {noreply, RequestingStateA} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7]}, {self(), GenServerRef1}, online_state()),
+    {ok, RpcRequest1} = get_uart_write(),
+    % request2
+    GenServerRef2 = make_ref(),
+    {noreply, RequestingStateB} = purr_atomvm:handle_call({rpc, lists, seq, [1, 3]}, {self(), GenServerRef2}, RequestingStateA),
+    {ok, RpcRequest2} = get_uart_write(),
+
+    % we are concatenating the two requests in and split them
+    % at a random point
+    % each request is 97 bytes long
+    ConcatRequest = <<RpcRequest2/binary, RpcRequest1/binary>>,
+    <<RequestFragment1:100/binary, RequestFragment2:94/binary>> = ConcatRequest,
+
+    %replying side
+    {noreply, ReplyingStateA} = purr_atomvm:handle_info({received, RequestFragment1}, online_state()),
+    {reply, RpcReply1} = get_rpc_result(),
+    {noreply, ReplyingStateB} = purr_atomvm:handle_info({reply, RpcReply1}, ReplyingStateA),
+    {ok, RpcReply1} = get_uart_write(),
+
+    % requesting side
+    {noreply, RequestingStateC} = purr_atomvm:handle_info({received, RpcReply1}, RequestingStateB),
+    {GenServerRef2, {ok, [1,2,3]}} = get_rpc_result(),
+
+    %replying side
+    {noreply, ReplyingStateC} = purr_atomvm:handle_info({received, RequestFragment2}, ReplyingStateB),
+    {reply, RpcReply2} = get_rpc_result(),
+    {noreply, _ReplyingStateD} = purr_atomvm:handle_info({reply, RpcReply2}, ReplyingStateC),
+    {ok, RpcReply2} = get_uart_write(),
+
+    % requesting side
+    {noreply, _RequestingStateD} = purr_atomvm:handle_info({received, RpcReply2}, RequestingStateC),
+    {GenServerRef1, {ok, [1,2,3,4,5,6,7]}} = get_rpc_result().
 
 
 
