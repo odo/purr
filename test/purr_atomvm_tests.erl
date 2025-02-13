@@ -55,7 +55,7 @@ test_failed_syncing() ->
 test_roundtrip() ->
     GenServerRef = make_ref(),
     % requesting side
-    {noreply, _} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7]}, {self(), GenServerRef}, online_state()),
+    {noreply, RequestingState} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7]}, {self(), GenServerRef}, online_state()),
     {ok, RpcRequest} = get_uart_write(),
 
     %replying side
@@ -65,7 +65,7 @@ test_roundtrip() ->
     {ok, RpcReply} = get_uart_write(),
 
     % requesting side
-    purr_atomvm:handle_info({received, RpcReply}, online_state()),
+    purr_atomvm:handle_info({received, RpcReply}, RequestingState),
     {GenServerRef, {ok, [1,2,3,4,5,6,7]}} = get_rpc_result().
 
 test_double_roundtrip() ->
@@ -81,9 +81,9 @@ test_double_roundtrip() ->
 
     % we are concatenating the two requests in and split them
     % at a random point
-    % each request is 97 bytes long
+    % each request is 35 bytes long
     ConcatRequest = <<RpcRequest2/binary, RpcRequest1/binary>>,
-    <<RequestFragment1:100/binary, RequestFragment2:94/binary>> = ConcatRequest,
+    <<RequestFragment1:50/binary, RequestFragment2:20/binary>> = ConcatRequest,
 
     %replying side
     {noreply, ReplyingStateA} = purr_atomvm:handle_info({received, RequestFragment1}, online_state()),

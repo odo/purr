@@ -2,26 +2,25 @@
 
 -export([find/2]).
 
-find(Same, Same) ->
-    match;
-find(<<>>, _) ->
-    mismatch;
-find(<<_:1/binary, PostfixReceived/binary>> = Received, SyncWord) ->
-    case {binary:longest_common_prefix([Received, SyncWord]), size(Received), size(SyncWord)} of
-        {0, _, _} ->
-            % not even the first byte matches
-            % so we assume a garbage prefix andkeep trying without
-            find(PostfixReceived, SyncWord);
-        {ML, RL, SL} when (ML < RL) and (ML < SL) ->
-            % neither side fully matches
-            mismatch;
-        {ML, RL, SL} when (ML < RL) and (ML == SL) ->
-            % the start sequence matched but there is a rest of received data
-            <<_:ML/binary, ReceivedRest/binary>> = Received,
-            {match, ReceivedRest};
-        {ML, RL, SL} when (ML == RL) and (ML < SL) ->
-            % the received data matched but there is a rest from the start sequence remaining
-            <<_:ML/binary, SyncWordRest/binary>> = SyncWord,
-            {continue, SyncWordRest}
-    end.
+find(Received, SyncWord) ->
+    find(Received, SyncWord, SyncWord).
 
+find(Same, Same, _) ->
+    match;
+find(<<FirstByte:1/binary, ReceivedRest/binary>>, <<FirstByte:1/binary, SyncWordRest/binary>>, OriginalSyncWord) ->
+    % the first bytes match, lets continue
+    find(ReceivedRest, SyncWordRest, OriginalSyncWord);
+find(ReceivedRest, <<>>, _) ->
+    % the sync word matched but there is a rest of received data
+    {match, ReceivedRest};
+find(<<>>, CompleteSyncWord, CompleteSyncWord) ->
+    mismatch;
+find(<<>>, SyncWordRest, _) ->
+    % the received data matched but there is a rest from the sync word remaining
+    {continue, SyncWordRest};
+find(<<_:1/binary, ReceivedRest/binary>>, OriginalSyncWord, OriginalSyncWord) ->
+    % we did not reach the sync word yet
+    % so we keep discarding prefixes
+    find(ReceivedRest, OriginalSyncWord, OriginalSyncWord);
+find(_, _, _) ->
+    mismatch.
