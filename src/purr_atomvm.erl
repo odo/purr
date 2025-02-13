@@ -34,7 +34,8 @@ rpc(Module, Function, Arguments) ->
 
 init([]) ->
     UART = uart:open("UART1", [{rx, 17}, {tx, 18}]),
-    ReaderPid = spawn_link(fun() -> read_loop(UART, self()) end),
+    ServerPid = self(),
+    ReaderPid = spawn_link(fun() -> read_loop(UART, ServerPid) end),
     InitialState = #state{
         uart = UART,
         mode = syncing,
@@ -51,7 +52,7 @@ handle_call({rpc, Module, Function, Arguments}, Caller, State = #state{mode = on
         function = Function,
         arguments = Arguments
     },
-    CallBinary = term_to_binary(Call),
+    CallBinary = encode(Call),
     Payload = <<?MESSAGEPREFIX/binary, (size(CallBinary)):32/integer, CallBinary/binary>>,
     uart:write(UART, Payload),
     {noreply, State};
@@ -61,9 +62,15 @@ handle_call({rpc, _, _, _}, _From, State) ->
 handle_cast(_, State) ->
     {noreply, State}.
 
-handle_info(send_sync, State = #state{uart = UART}) ->
+handle_info(send_sync, State = #state{uart = UART, mode = Mode}) ->
     uart:write(UART, [?SYNCWORD]),
     erlang:send_after(?SYNCINTERVAL, self(), send_sync),
+    case Mode of
+        syncing ->
+            io:format("~p: syncing...~n", [?MODULE]);
+        _ ->
+            noop
+    end,
     {noreply, State};
 
 handle_info({received, Data}, State = #state{mode = syncing, syncword = Syncword}) ->
@@ -76,6 +83,7 @@ handle_info({received, Data}, State = #state{mode = syncing, syncword = Syncword
             self() ! {received, AdditionalData},
             {noreply, State#state{mode = online, syncword = ?SYNCWORD}};
         mismatch ->
+            io:format("~p: failed to syn~n", [?MODULE]),
             {noreply, State}
     end;
 handle_info({received, Data}, State = #state{mode = online, receive_buffer = ReceiveBuffer}) ->
@@ -110,7 +118,8 @@ code_change(_OldVsn, State, _Extra) ->
 % read loop
 read_loop(UART, ReplyPid) ->
     {ok, Data} = uart:read(UART),
-    ReplyPid ! {received, Data}.
+    ReplyPid ! {received, Data},
+    read_loop(UART, ReplyPid).
 
 %% receiving data
 maybe_parse_received_data(<<MessagePrefix:(byte_size(?MESSAGEPREFIX))/binary, Payload/binary>>) ->
@@ -123,7 +132,7 @@ maybe_parse_received_data(_) ->
 
 parse_received_data(<<Length:32/integer, BinaryData:Length/binary, RestReceived/binary>>) ->
    MaybeData =
-   try binary_to_term(BinaryData) of
+   try decode(BinaryData) of
        Data -> Data
    catch error:Error -> {erorr, Error}
    end,
@@ -143,7 +152,7 @@ call_rpc(#rpc{caller = Caller, module = Module, function = Function, arguments =
     try apply(Module, Function, Arguments) of
         Result ->
             Reply = #rpc_reply{caller = Caller, reply = {ok, Result}},
-            ReplyBinary = term_to_binary(Reply),
+            ReplyBinary = encode(Reply),
             Payload = <<?MESSAGEPREFIX/binary, (size(ReplyBinary)):32/integer, ReplyBinary/binary>>,
 
             ReplyPid ! {reply, Payload}
@@ -155,3 +164,9 @@ call_rpc(#rpc{caller = Caller, module = Module, function = Function, arguments =
             exit:Exit ->
                 ReplyPid ! {error, exit, Exit}
     end.
+
+encode(Term) ->
+    term_to_binary(Term).
+decode(Binary) ->
+    binary_to_term(Binary).
+
