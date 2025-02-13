@@ -167,8 +167,9 @@ maybe_parse_received_data(_) ->
 parse_received_data(<<Length:32/integer, BinaryData:Length/binary, RestReceived/binary>>) ->
    MaybeData =
    try decode(BinaryData) of
-       Data -> Data
-   catch error:Error -> {erorr, Error}
+        Data -> Data
+   catch error:Error ->
+        {error, Error}
    end,
    case MaybeData of
         {error, _} ->
