@@ -12,7 +12,8 @@ syncword_test_() ->
         fun test_syncing_in_parts/0,
         fun test_failed_syncing/0,
         fun test_roundtrip/0,
-        fun test_double_roundtrip/0
+        fun test_double_roundtrip/0,
+        fun test_recovery/0
     ]}.
 
 setup() ->
@@ -105,6 +106,43 @@ test_double_roundtrip() ->
     {noreply, _RequestingStateD} = purr_atomvm:handle_info({received, RpcReply2}, RequestingStateC),
     {GenServerRef1, {ok, [1,2,3,4,5,6,7]}} = get_rpc_result().
 
+test_recovery() ->
+    % requesting side
+    % request1
+    GenServerRef1 = make_ref(),
+    {noreply, RequestingStateA} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7], 1000}, {self(), GenServerRef1}, online_state()),
+    {ok, _RpcRequest1Original} = get_uart_write(),
+    % request2
+    GenServerRef2 = make_ref(),
+    {noreply, RequestingStateB} = purr_atomvm:handle_call({rpc, lists, seq, [1, 3], 1000}, {self(), GenServerRef2}, RequestingStateA),
+    {ok, RpcRequest2} = get_uart_write(),
+
+    % we are messing up the first request
+    % at a random point
+    % each request is 35 bytes long
+    RpcRequest1 = <<"this is a completely unreadable message no one can read!">>,
+
+    % replying side
+    {noreply, ReplyingStateA} = purr_atomvm:handle_info({received, RpcRequest1}, online_state()),
+    % the faulty request is barfed back at us
+    % so we feed it back and add a sync word
+    {received, RpcRequest1} = get_rpc_result(),
+    {noreply, ReplyingStateB} = purr_atomvm:handle_info({received, RpcRequest1}, ReplyingStateA),
+    {noreply, ReplyingStateC} = purr_atomvm:handle_info({received, <<"PuRRpUrrPurrLFG">>}, ReplyingStateB),
+
+    % we confirm that the requesting side does not get anything (it will time out)
+    {error, no_data} = get_uart_write(),
+
+    % we can now continue with the second in tact request
+    {noreply, ReplyingStateD} = purr_atomvm:handle_info({received, RpcRequest2}, ReplyingStateC),
+
+    {reply, RpcReply2} = get_rpc_result(),
+    {noreply, _ReplyingStateE} = purr_atomvm:handle_info({reply, RpcReply2}, ReplyingStateD),
+    {ok, RpcReply2} = get_uart_write(),
+
+    % requesting side
+    {noreply, _RequestingStateC} = purr_atomvm:handle_info({received, RpcReply2}, RequestingStateB),
+    {GenServerRef2, {ok, [1,2,3]}} = get_rpc_result().
 
 
 % internal
