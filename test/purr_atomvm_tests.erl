@@ -55,7 +55,7 @@ test_failed_syncing() ->
 test_roundtrip() ->
     GenServerRef = make_ref(),
     % requesting side
-    {noreply, RequestingState} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7]}, {self(), GenServerRef}, online_state()),
+    {noreply, RequestingState} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7], 1000}, {self(), GenServerRef}, online_state()),
     {ok, RpcRequest} = get_uart_write(),
 
     %replying side
@@ -72,11 +72,11 @@ test_double_roundtrip() ->
     % requesting side
     % request1
     GenServerRef1 = make_ref(),
-    {noreply, RequestingStateA} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7]}, {self(), GenServerRef1}, online_state()),
+    {noreply, RequestingStateA} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7], 1000}, {self(), GenServerRef1}, online_state()),
     {ok, RpcRequest1} = get_uart_write(),
     % request2
     GenServerRef2 = make_ref(),
-    {noreply, RequestingStateB} = purr_atomvm:handle_call({rpc, lists, seq, [1, 3]}, {self(), GenServerRef2}, RequestingStateA),
+    {noreply, RequestingStateB} = purr_atomvm:handle_call({rpc, lists, seq, [1, 3], 1000}, {self(), GenServerRef2}, RequestingStateA),
     {ok, RpcRequest2} = get_uart_write(),
 
     % we are concatenating the two requests in and split them

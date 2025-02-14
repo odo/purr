@@ -77,7 +77,7 @@ handle_call({rpc, Module, Function, Arguments, Timeout}, Caller, State = #state{
     % the call data is cleaned up
     erlang:send_after(Timeout + 50, self(), {clean_call, CallId}),
     {noreply, State#state{next_call_id = CallId + 1, calls = NextCalls}};
-handle_call({rpc, _, _, _}, _From, State) ->
+handle_call({rpc, _, _, _, _}, _From, State) ->
     {reply, {error, not_online}, State}.
 
 handle_cast(_, State) ->
