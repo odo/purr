@@ -1,6 +1,23 @@
 -module(purr_atomvm_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-behaviour(purr_transport).
+-export([
+        init/1,
+        read/1,
+        write/2
+        ]).
+
+%--- We are defining our test transport ---------------------------------------------------------------------
+
+init(_) ->
+    nil.
+read(_) ->
+    receive
+        never -> return
+    end.
+write(_, Data) ->
+    ets:insert(test_table, {transport_write, Data}).
 
 %--- Setup ---------------------------------------------------------------------
 
@@ -17,22 +34,17 @@ syncword_test_() ->
     ]}.
 
 setup() ->
-    TestTable = ets:new(test_table, [set, public, named_table]),
-    meck:new(uart, [non_strict]),
-    meck:expect(uart, open, fun(_, _) -> uart_mock end),
-    meck:expect(uart, read, fun(_) -> receive never -> return end end),
-    meck:expect(uart, write, fun(_, Data) -> ets:insert(TestTable, {uart_write, Data}) end),
+    ets:new(test_table, [set, public, named_table]),
     ok.
 
 teardown(_) ->
-    meck:unload(uart),
     ets:delete(test_table),
     ok.
 
 %--- Tests ---------------------------------------------------------------------
 
 test_init() ->
-    {ok, InitState} = purr_atomvm:init([]),
+    {ok, InitState} = purr_atomvm:init([?MODULE, nil]),
     ?assertMatch(syncing, mode(InitState)).
 
 test_plain_syncing() ->
@@ -57,13 +69,13 @@ test_roundtrip() ->
     GenServerRef = make_ref(),
     % requesting side
     {noreply, RequestingState} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7], 1000}, {self(), GenServerRef}, online_state()),
-    {ok, RpcRequest} = get_uart_write(),
+    {ok, RpcRequest} = get_transport_write(),
 
     %replying side
     {noreply, _} = purr_atomvm:handle_info({received, RpcRequest}, online_state()),
     {reply, RpcReply} = get_rpc_result(),
     purr_atomvm:handle_info({reply, RpcReply}, online_state()),
-    {ok, RpcReply} = get_uart_write(),
+    {ok, RpcReply} = get_transport_write(),
 
     % requesting side
     purr_atomvm:handle_info({received, RpcReply}, RequestingState),
@@ -74,11 +86,11 @@ test_double_roundtrip() ->
     % request1
     GenServerRef1 = make_ref(),
     {noreply, RequestingStateA} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7], 1000}, {self(), GenServerRef1}, online_state()),
-    {ok, RpcRequest1} = get_uart_write(),
+    {ok, RpcRequest1} = get_transport_write(),
     % request2
     GenServerRef2 = make_ref(),
     {noreply, RequestingStateB} = purr_atomvm:handle_call({rpc, lists, seq, [1, 3], 1000}, {self(), GenServerRef2}, RequestingStateA),
-    {ok, RpcRequest2} = get_uart_write(),
+    {ok, RpcRequest2} = get_transport_write(),
 
     % we are concatenating the two requests in and split them
     % at a random point
@@ -90,7 +102,7 @@ test_double_roundtrip() ->
     {noreply, ReplyingStateA} = purr_atomvm:handle_info({received, RequestFragment1}, online_state()),
     {reply, RpcReply1} = get_rpc_result(),
     {noreply, ReplyingStateB} = purr_atomvm:handle_info({reply, RpcReply1}, ReplyingStateA),
-    {ok, RpcReply1} = get_uart_write(),
+    {ok, RpcReply1} = get_transport_write(),
 
     % requesting side
     {noreply, RequestingStateC} = purr_atomvm:handle_info({received, RpcReply1}, RequestingStateB),
@@ -100,7 +112,7 @@ test_double_roundtrip() ->
     {noreply, ReplyingStateC} = purr_atomvm:handle_info({received, RequestFragment2}, ReplyingStateB),
     {reply, RpcReply2} = get_rpc_result(),
     {noreply, _ReplyingStateD} = purr_atomvm:handle_info({reply, RpcReply2}, ReplyingStateC),
-    {ok, RpcReply2} = get_uart_write(),
+    {ok, RpcReply2} = get_transport_write(),
 
     % requesting side
     {noreply, _RequestingStateD} = purr_atomvm:handle_info({received, RpcReply2}, RequestingStateC),
@@ -111,11 +123,11 @@ test_recovery() ->
     % request1
     GenServerRef1 = make_ref(),
     {noreply, RequestingStateA} = purr_atomvm:handle_call({rpc, lists, seq, [1, 7], 1000}, {self(), GenServerRef1}, online_state()),
-    {ok, _RpcRequest1Original} = get_uart_write(),
+    {ok, _RpcRequest1Original} = get_transport_write(),
     % request2
     GenServerRef2 = make_ref(),
     {noreply, RequestingStateB} = purr_atomvm:handle_call({rpc, lists, seq, [1, 3], 1000}, {self(), GenServerRef2}, RequestingStateA),
-    {ok, RpcRequest2} = get_uart_write(),
+    {ok, RpcRequest2} = get_transport_write(),
 
     % we are messing up the first request
     % at a random point
@@ -131,14 +143,14 @@ test_recovery() ->
     {noreply, ReplyingStateC} = purr_atomvm:handle_info({received, <<"PuRRpUrrPurrLFG">>}, ReplyingStateB),
 
     % we confirm that the requesting side does not get anything (it will time out)
-    {error, no_data} = get_uart_write(),
+    {error, no_data} = get_transport_write(),
 
     % we can now continue with the second in tact request
     {noreply, ReplyingStateD} = purr_atomvm:handle_info({received, RpcRequest2}, ReplyingStateC),
 
     {reply, RpcReply2} = get_rpc_result(),
     {noreply, _ReplyingStateE} = purr_atomvm:handle_info({reply, RpcReply2}, ReplyingStateD),
-    {ok, RpcReply2} = get_uart_write(),
+    {ok, RpcReply2} = get_transport_write(),
 
     % requesting side
     {noreply, _RequestingStateC} = purr_atomvm:handle_info({received, RpcReply2}, RequestingStateB),
@@ -147,7 +159,7 @@ test_recovery() ->
 
 % internal
 init_state() ->
-    {ok, State} = purr_atomvm:init([]),
+    {ok, State} = purr_atomvm:init([?MODULE, nil]),
     State.
 
 online_state() ->
@@ -155,15 +167,15 @@ online_state() ->
     SyncState.
 
 mode(State) ->
-    element(3, State).
+    element(4, State).
 
-get_uart_write() ->
-    case ets:lookup(test_table, uart_write) of
-    [{uart_write, Data}] ->
-        ets:delete(test_table, uart_write),
-        {ok, Data};
-    [] ->
-        {error, no_data}
+get_transport_write() ->
+    case ets:lookup(test_table, transport_write) of
+        [{transport_write, Data}] ->
+            ets:delete(test_table, transport_write),
+            {ok, Data};
+        [] ->
+            {error, no_data}
     end.
 
 get_rpc_result() ->

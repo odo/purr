@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 -export([start/0]).
 
--export([start_link/0]).
+-export([start_link/2]).
 -export([rpc/3]).
 
 -export([init/1,
@@ -16,42 +16,41 @@
 -define(MESSAGEPREFIX, <<"purr">>).
 -define(SYNCINTERVAL, 500).
 
--record(state, {uart, mode, reader_pid, syncword, receive_buffer, calls, next_call_id}).
+-record(state, {transport, transport_state, mode, reader_pid, syncword, receive_buffer, calls, next_call_id}).
 -record(rpc, {call_id, module, function, arguments}).
 -record(rpc_reply, {call_id, reply}).
 
 start() ->
-    start_link(),
+    start_link(atomvm_uart_transport, ["UART1", [{rx, 17}, {tx, 18}]]),
     timer:sleep(100),
     request_loop(0).
 
 request_loop(I) ->
+    timer:sleep(10),
     try
-        Reply = rpc(math, pow, [I, 1], 100),
-        case I rem 100 of
-            0 -> io:format("~p: reply ~p: ~p ~n", [?MODULE, I, Reply]);
-            _ -> noop
-        end
+        Reply = rpc(lists, seq, [1, 10], 5000),
+        io:format("~p: reply ~p: ~p ~n", [?MODULE, I, Reply])
     catch
         exit:Reason ->
             io:format("~p: call ~p failed: ~p ~n", [?MODULE, I, Reason])
     end,
     request_loop(I + 1).
 
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Transport, TransportParameters) ->
+    {ok, _Pid} = gen_server:start_link({local, ?MODULE}, ?MODULE, [Transport, TransportParameters], []).
 
 rpc(Module, Function, Arguments) ->
     rpc(Module, Function, Arguments, 5000).
 rpc(Module, Function, Arguments, Timeout) ->
     gen_server:call(?MODULE, {rpc, Module, Function, Arguments, Timeout}, Timeout).
 
-init([]) ->
-    UART = uart:open("UART1", [{rx, 17}, {tx, 18}]),
+init([Transport, TransportParameters]) ->
+    TransportState = Transport:init(TransportParameters),
     ServerPid = self(),
-    ReaderPid = spawn_link(fun() -> read_loop(UART, ServerPid) end),
+    ReaderPid = spawn_link(fun() -> read_loop(Transport, TransportState, ServerPid) end),
     InitialState = #state{
-        uart = UART,
+        transport = Transport,
+        transport_state = TransportState,
         mode = syncing,
         syncword = ?SYNCWORD,
         reader_pid = ReaderPid,
@@ -62,7 +61,7 @@ init([]) ->
     self() !  send_sync,
     {ok, InitialState}.
 
-handle_call({rpc, Module, Function, Arguments, Timeout}, Caller, State = #state{mode = online, uart = UART, calls = Calls, next_call_id = CallId}) ->
+handle_call({rpc, Module, Function, Arguments, Timeout}, Caller, State = #state{transport = Transport, transport_state = TransportState, mode = online, calls = Calls, next_call_id = CallId}) ->
     Call = #rpc{
         call_id = CallId,
         module = Module,
@@ -71,7 +70,7 @@ handle_call({rpc, Module, Function, Arguments, Timeout}, Caller, State = #state{
     },
     CallBinary = encode(Call),
     Payload = <<?MESSAGEPREFIX/binary, (size(CallBinary)):32/integer, CallBinary/binary>>,
-    uart:write(UART, Payload),
+    Transport:write(TransportState, Payload),
     NextCalls = maps:put(CallId, Caller, Calls),
     % if the call never returns we need to make sure
     % the call data is cleaned up
@@ -83,9 +82,9 @@ handle_call({rpc, _, _, _, _}, _From, State) ->
 handle_cast(_, State) ->
     {noreply, State}.
 
-handle_info(send_sync, State = #state{uart = UART, mode = Mode}) ->
+handle_info(send_sync, State = #state{transport = Transport, transport_state = TransportState, mode = Mode}) ->
     % io:format("~p: state: ~p~n", [?MODULE, State]),
-    uart:write(UART, [?SYNCWORD]),
+    Transport:write(TransportState, ?SYNCWORD),
     erlang:send_after(?SYNCINTERVAL, self(), send_sync),
     case Mode of
         syncing ->
@@ -136,8 +135,8 @@ handle_info({received, Data}, State = #state{mode = online, receive_buffer = Rec
             self() ! {received, ReceivedData},
             {noreply,State#state{receive_buffer = <<>>, mode = syncing}}
     end;
-handle_info({reply, Data}, State = #state{mode = online, uart = UART}) ->
-    uart:write(UART, Data),
+handle_info({reply, Data}, State = #state{transport = Transport, transport_state = TransportState, mode = online}) ->
+    Transport:write(TransportState, Data),
     {noreply, State};
 handle_info(Msg = {reply, _}, State = #state{mode = syncing}) ->
     % we are currently syncing
@@ -163,10 +162,10 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 % read loop
-read_loop(UART, ReplyPid) ->
-    {ok, Data} = uart:read(UART),
+read_loop(Transport, TransportState, ReplyPid) ->
+    {ok, Data} = Transport:read(TransportState),
     ReplyPid ! {received, Data},
-    read_loop(UART, ReplyPid).
+    read_loop(Transport, TransportState, ReplyPid).
 
 %% receiving data
 maybe_parse_received_data(?SYNCWORD) ->
@@ -220,4 +219,3 @@ encode(Term) ->
     term_to_binary(Term).
 decode(Binary) ->
     binary_to_term(Binary).
-
