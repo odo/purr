@@ -2,8 +2,6 @@
 
 This library provides a way to do remote procedure call (RPC) between Erlang driven microcontrollers or computers.
 
-<audio controls src="https://upload.wikimedia.org/wikipedia/commons/d/db/Purring_cat.oga"></audio>
-
 > [!NOTE]
 > This project is under decelopment and is not recemmended for production yet.
 
