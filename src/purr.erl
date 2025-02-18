@@ -1,4 +1,4 @@
--module(purr_atomvm).
+-module(purr).
 -behaviour(gen_server).
 -export([start/0]).
 
