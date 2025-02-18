@@ -1,6 +1,7 @@
 # Purr: RPC library from Erlang-driven microcontrollers
 
-[!Note] This project is under decelopment and is not recemmended for production yet.
+> [!NOTE]
+> This project is under decelopment and is not recemmended for production yet.
 
 This library provides a way to do remote procedure call (RPC) between Erlang driven microcontrollers or computers.
 
